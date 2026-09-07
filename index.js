@@ -3,8 +3,8 @@ require("dotenv").config();
 const {
     Client,
     GatewayIntentBits,
-    ChannelType,
-    ActivityType
+    ActivityType,
+    ChannelType
 } = require("discord.js");
 
 const {
@@ -15,29 +15,17 @@ const {
 
 const config = require("./config.json");
 
-// ================================
-// CHECK CONFIGURATION
-// ================================
+const token = process.env.DISCORD_TOKEN;
 
-if (!process.env.DISCORD_TOKEN) {
-    console.error("ERROR: DISCORD_TOKEN is not set.");
+if (!token) {
+    console.error("❌ DISCORD_TOKEN is missing.");
     process.exit(1);
 }
 
-if (!config.Guild) {
-    console.error("ERROR: Guild is not set in config.json.");
+if (!config.Guild || !config.Channel) {
+    console.error("❌ Guild or Channel is missing from config.json.");
     process.exit(1);
 }
-
-if (!config.Channel) {
-    console.error("ERROR: Channel is not set in config.json.");
-    process.exit(1);
-}
-
-
-// ================================
-// DISCORD CLIENT
-// ================================
 
 const client = new Client({
     intents: [
@@ -46,322 +34,204 @@ const client = new Client({
     ]
 });
 
-
-// ================================
-// SET STATUS
-// ================================
+let connection = null;
 
 function setBotStatus() {
+    const statusConfig = config.Status;
 
-    if (!config.Status || config.Status.enabled === false) {
-        client.user.setPresence({
-            activities: [],
-            status: "online"
-        });
-
-        console.log("Status disabled.");
+    if (!statusConfig || statusConfig.enabled === false) {
         return;
     }
 
-    const status =
-        config.Status.status || "online";
+    const typeMap = {
+        playing: ActivityType.Playing,
+        streaming: ActivityType.Streaming,
+        watching: ActivityType.Watching,
+        listening: ActivityType.Listening,
+        custom: ActivityType.Custom
+    };
 
-    const type =
-        String(config.Status.type || "playing").toLowerCase();
-
-    const text =
-        config.Status.text || "";
-
-    let activityType;
-
-    switch (type) {
-
-        case "playing":
-            activityType = ActivityType.Playing;
-            break;
-
-        case "streaming":
-            activityType = ActivityType.Streaming;
-            break;
-
-        case "watching":
-            activityType = ActivityType.Watching;
-            break;
-
-        case "listening":
-            activityType = ActivityType.Listening;
-            break;
-
-        case "custom":
-            activityType = ActivityType.Custom;
-            break;
-
-        default:
-            console.log(
-                `Unknown status type "${type}". Using playing.`
-            );
-
-            activityType = ActivityType.Playing;
-    }
+    const activityType =
+        typeMap[String(statusConfig.type).toLowerCase()] ??
+        ActivityType.Playing;
 
     const activity = {
-        name: text,
+        name: statusConfig.text || "Discord",
         type: activityType
     };
 
-    // Streaming requires a URL.
+    // Streaming activities require a Twitch/YouTube-style URL.
     if (activityType === ActivityType.Streaming) {
         activity.url =
-            config.Status.url ||
-            "https://www.twitch.tv/discord";
+            statusConfig.url || "https://www.twitch.tv/discord";
     }
 
     client.user.setPresence({
-        activities: [activity],
-        status: status
+        status: statusConfig.status || "online",
+        activities: [activity]
     });
 
     console.log(
-        `Status set: ${type} - ${text}`
+        `✅ Status set: ${statusConfig.type} ${statusConfig.text}`
     );
 }
-
-
-// ================================
-// JOIN VOICE CHANNEL
-// ================================
 
 async function joinVC() {
+    try {
+        const guild = client.guilds.cache.get(config.Guild);
 
-    const guild =
-        client.guilds.cache.get(config.Guild);
-
-    if (!guild) {
-        throw new Error(
-            `Guild ${config.Guild} was not found.`
-        );
-    }
-
-    const voiceChannel =
-        guild.channels.cache.get(config.Channel);
-
-    if (!voiceChannel) {
-        throw new Error(
-            `Voice channel ${config.Channel} was not found.`
-        );
-    }
-
-    if (
-        voiceChannel.type !==
-        ChannelType.GuildVoice
-    ) {
-        throw new Error(
-            "The configured Channel ID is not a voice channel."
-        );
-    }
-
-    console.log(
-        `Connecting to voice channel: ${voiceChannel.name}`
-    );
-
-    const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: guild.id,
-        adapterCreator: guild.voiceAdapterCreator,
-
-        // Bot joins muted and deafened.
-        selfMute: true,
-        selfDeaf: true
-    });
-
-
-    // ================================
-    // VOICE CONNECTION READY
-    // ================================
-
-    connection.on(
-        VoiceConnectionStatus.Ready,
-        () => {
-            console.log(
-                `Connected to ${voiceChannel.name}`
+        if (!guild) {
+            console.error(
+                `❌ Could not find guild ${config.Guild}.`
             );
+            return;
         }
-    );
 
+        const voiceChannel = guild.channels.cache.get(config.Channel);
 
-    // ================================
-    // VOICE DISCONNECTED
-    // ================================
-
-    connection.on(
-        VoiceConnectionStatus.Disconnected,
-        async () => {
-
-            console.log(
-                "Voice connection disconnected."
+        if (!voiceChannel) {
+            console.error(
+                `❌ Could not find voice channel ${config.Channel}.`
             );
+            return;
+        }
 
+        if (voiceChannel.type !== ChannelType.GuildVoice) {
+            console.error("❌ Configured channel is not a voice channel.");
+            return;
+        }
+
+        // Destroy the old connection if one exists.
+        if (connection) {
             try {
+                connection.destroy();
+            } catch (_) {}
+        }
 
-                await Promise.race([
-                    entersState(
-                        connection,
-                        VoiceConnectionStatus.Signalling,
-                        5000
-                    ),
+        connection = joinVoiceChannel({
+            channelId: voiceChannel.id,
+            guildId: guild.id,
+            adapterCreator: guild.voiceAdapterCreator,
 
-                    entersState(
-                        connection,
-                        VoiceConnectionStatus.Connecting,
-                        5000
-                    )
-                ]);
+            // Bot stays muted/deafened.
+            selfMute: true,
+            selfDeaf: true
+        });
 
-                console.log(
-                    "Voice connection recovered."
-                );
+        console.log(
+            `🔊 Joining voice channel: ${voiceChannel.name}`
+        );
 
-            } catch {
+        connection.on(
+            VoiceConnectionStatus.Ready,
+            () => {
+                console.log("✅ Voice connection ready.");
+            }
+        );
 
-                console.log(
-                    "Voice connection could not recover."
-                );
+        connection.on(
+            VoiceConnectionStatus.Disconnected,
+            async () => {
+                console.log("⚠️ Voice connection disconnected.");
 
                 try {
+                    await Promise.race([
+                        entersState(
+                            connection,
+                            VoiceConnectionStatus.Signalling,
+                            5_000
+                        ),
+                        entersState(
+                            connection,
+                            VoiceConnectionStatus.Connecting,
+                            5_000
+                        )
+                    ]);
 
-                    connection.destroy();
+                    console.log("🔄 Voice connection recovering...");
+                } catch {
+                    console.log("🔄 Reconnecting to voice channel...");
 
-                    await new Promise(
-                        resolve =>
-                            setTimeout(resolve, 2000)
-                    );
+                    try {
+                        connection.destroy();
+                    } catch (_) {}
 
-                    await joinVC();
+                    connection = null;
 
-                } catch (error) {
-
-                    console.error(
-                        "Failed to reconnect:",
-                        error
-                    );
-
-                    // Try again after 10 seconds.
-                    setTimeout(
-                        () => joinVC().catch(console.error),
-                        10000
-                    );
+                    setTimeout(() => {
+                        joinVC().catch(console.error);
+                    }, 3_000);
                 }
             }
-        }
-    );
+        );
+    } catch (error) {
+        console.error("❌ Failed to join voice channel:");
+        console.error(error);
+    }
 }
 
-
-// ================================
-// BOT READY
-// ================================
-
 client.once("ready", async () => {
+    console.log(`✅ Logged in as ${client.user.tag}`);
 
-    console.log(
-        `Logged in as ${client.user.tag}!`
-    );
-
-    // Set Discord status.
     setBotStatus();
 
-    // Join configured voice channel.
-    try {
+    await joinVC();
+});
 
-        await joinVC();
+client.on("voiceStateUpdate", async (oldState, newState) => {
+    // Only react when the BOT's own voice state changes.
+    if (!client.user || newState.id !== client.user.id) {
+        return;
+    }
 
-    } catch (error) {
+    const oldChannel = oldState.channelId;
+    const newChannel = newState.channelId;
 
-        console.error(
-            "Failed to join voice channel:",
-            error
-        );
+    if (oldChannel === newChannel) {
+        return;
+    }
+
+    // Bot was disconnected.
+    if (!newChannel) {
+        console.log("⚠️ Bot was disconnected from voice.");
+        setTimeout(() => {
+            joinVC().catch(console.error);
+        }, 2_000);
+
+        return;
+    }
+
+    // Bot was moved to another voice channel.
+    if (newChannel !== config.Channel) {
+        console.log("⚠️ Bot was moved. Returning to configured channel.");
+
+        setTimeout(() => {
+            joinVC().catch(console.error);
+        }, 1_000);
     }
 });
 
+client.on("error", (error) => {
+    console.error("❌ Discord client error:");
+    console.error(error);
+});
 
-// ================================
-// WATCH BOT VOICE STATE
-// ================================
+process.on("unhandledRejection", (error) => {
+    console.error("❌ Unhandled promise rejection:");
+    console.error(error);
+});
 
-client.on(
-    "voiceStateUpdate",
-    async (oldState, newState) => {
+process.on("uncaughtException", (error) => {
+    console.error("❌ Uncaught exception:");
+    console.error(error);
+});
 
-        // Only react to THIS bot.
-        if (
-            newState.id !== client.user.id
-        ) {
-            return;
-        }
-
-
-        // ============================
-        // BOT WAS DISCONNECTED
-        // ============================
-
-        if (
-            oldState.channelId &&
-            !newState.channelId
-        ) {
-
-            console.log(
-                "Bot was disconnected. Rejoining..."
-            );
-
-            try {
-                await joinVC();
-            } catch (error) {
-                console.error(
-                    "Failed to rejoin:",
-                    error
-                );
-            }
-
-            return;
-        }
-
-
-        // ============================
-        // BOT WAS MOVED
-        // ============================
-
-        if (
-            oldState.channelId &&
-            newState.channelId &&
-            newState.channelId !== config.Channel
-        ) {
-
-            console.log(
-                "Bot was moved to another channel."
-            );
-
-            console.log(
-                "Returning to configured channel..."
-            );
-
-            try {
-                await joinVC();
-            } catch (error) {
-                console.error(
-                    "Failed to return:",
-                    error
-                );
-            }
-        }
-    }
+console.log(
+    "Token loaded:",
+    token ? "YES" : "NO"
 );
 
-
-// ================================
-// LOGIN
-// ================================
-
-client.login(
-    process.env.DISCORD_TOKEN
-);
+client.login(token).catch((error) => {
+    console.error("❌ Discord login failed.");
+    console.error(error);
+});
