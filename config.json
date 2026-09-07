@@ -1,5 +1,13 @@
 {
-    "Token": "tokenhere",
-    "Guild": "",
-    "Channel": ""
+  "Token": "YOUR_BOT_TOKEN",
+  "Guild": "1545560632059764827",
+  "Channel": "1546414266884689920",
+
+  "Status": {
+    "enabled": true,
+    "status": "online",
+    "type": "streaming",
+    "text": "@pape",
+    "url": "https://www.twitch.tv/antiwizz"
+  }
 }
